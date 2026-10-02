@@ -53,6 +53,8 @@ DNS_PTR = 12
 DNS_HINFO = 13
 DNS_MX = 15
 DNS_TXT = 16
+DNS_RP = 17
+DNS_AFSDB = 18
 DNS_AAAA = 28
 DNS_SRV = 33
 DNS_OPT = 41
@@ -294,6 +296,14 @@ class DNS(dpkt.Packet):
                     pack_name(self.mxname, off + 2, label_ptrs)
             elif self.type == DNS_TXT or self.type == DNS_HINFO:
                 return b''.join(struct.pack('B', len(x)) + x for x in self.text)
+            elif self.type == DNS_RP:
+                l_ = []
+                l_.append(pack_name(self.mailbox, off, label_ptrs))
+                l_.append(pack_name(self.txtdname, off + len(l_[0]), label_ptrs))
+                return b''.join(l_)
+            elif self.type == DNS_AFSDB:
+                return struct.pack('>H', self.subtype) + \
+                    pack_name(self.hostname, off + 2, label_ptrs)
             elif self.type == DNS_AAAA:
                 return self.ip6
             elif self.type == DNS_SRV:
@@ -337,6 +347,12 @@ class DNS(dpkt.Packet):
                     n = compat_ord(buf[0])
                     self.text.append(codecs.decode(buf[1:1 + n], 'utf-8'))
                     buf = buf[1 + n:]
+            elif self.type == DNS_RP:
+                self.mailbox, off = unpack_name(buf, off)
+                self.txtdname, off = unpack_name(buf, off)
+            elif self.type == DNS_AFSDB:
+                self.subtype, = struct.unpack('>H', self.rdata[:2])
+                self.hostname, off = unpack_name(buf, off + 2)
             elif self.type == DNS_AAAA:
                 self.ip6 = self.rdata
             elif self.type == DNS_NULL:
@@ -489,6 +505,14 @@ def define_testdata():
         txt_resp = unhexlify(
             "10328180000100010000000006676f6f676c6503636f6d0000100001c00c00100"
             "0010000010e00100f763d7370663120707472203f616c6c"
+        )
+        rp_resp = unhexlify(
+            "f06181a00001000100000000076578616d706c6503636f6d0000110001c00c001"
+            "1000100000e1000130475736572c00c047573657204696e666fc00c"
+        )
+        afsdb_resp = unhexlify(
+            "533d81a00001000100000000076578616d706c65036f72670000120001c00c001"
+            "2000100000000000d0001086166732d686f7374c00c"
         )
     return TestData()
 
@@ -829,6 +853,45 @@ def test_rdata_HTTPS():
     correct = b'\x00\x01\x04svc2\x07example\x03net\x00\x00\x01\x00\x06\x02h2\x02h3'
     assert packdata == correct
 
+def test_rdata_RP():
+    buf = define_testdata().rp_resp
+    unpacked_rp = DNS(buf)
+    assert len(unpacked_rp.an) == 1
+    an = unpacked_rp.an[0]
+    assert an.type == DNS_RP
+    assert an.mailbox == "user.example.com"
+    assert an.txtdname == "user.info.example.com"
+
+    rr = DNS.RR(
+        type=DNS_RP,
+        cls=DNS_IN,
+        mailbox="admin.example.com",
+        txtdname="info.example.org",
+        ttl=3600
+    )
+    packed_rdata = rr.pack_rdata(0, {})
+    correct = b'\x05admin\x07example\x03com\x00\x04info\x07example\x03org\x00'
+    assert packed_rdata == correct
+
+def test_rdata_AFSDB():
+    buf = define_testdata().afsdb_resp
+    unpacked_afsdb = DNS(buf)
+    assert len(unpacked_afsdb.an) == 1
+    an = unpacked_afsdb.an[0]
+    assert an.type == DNS_AFSDB
+    assert an.subtype == 1
+    assert an.hostname == "afs-host.example.org"
+
+    rr = DNS.RR(
+        type=DNS_AFSDB,
+        cls=DNS_IN,
+        ttl=3600,
+        subtype=1,
+        hostname="afs.example.net"
+    )
+    packed_rdata = rr.pack_rdata(0, {})
+    correct = b'\x00\x01\x03afs\x07example\x03net\x00'
+    assert packed_rdata == correct
 
 def test_dns_len():
     my_dns = DNS()
