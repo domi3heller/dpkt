@@ -4,7 +4,7 @@
 from __future__ import print_function
 from __future__ import absolute_import
 
-from . import dpkt
+from . import dpkt, dns
 from .compat import compat_ord
 
 # TCP control flags
@@ -91,7 +91,12 @@ class TCP(dpkt.Packet):
         return self.__hdr_len__ + len(self.opts) + len(self.data)
 
     def __bytes__(self):
-        return self.pack_hdr() + bytes(self.opts) + bytes(self.data)
+        payload = b""
+        if isinstance(self.data, dns.DNS):
+            payload = self.data.pack_for_tcp()
+        else:
+            payload = bytes(self.data)
+        return self.pack_hdr() + bytes(self.opts) + payload
 
     def unpack(self, buf):
         dpkt.Packet.unpack(self, buf)
@@ -232,3 +237,25 @@ def test_tcp_pack():
         b'\xc3\x0c\x00\x00\x02\x04\x05\xb4\x01\x01\x04\x02')
 
     # TODO: add checksum calculation
+
+def test_tcp_pack_dns():
+    data = dns.DNS(
+        b"\xa1\x8d\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com"
+        b"\x00\x00\x01\x00\x01"
+    )
+    tcp = TCP(
+        sport=53598,
+        dport=53,
+        seq=3761304859,
+        ack=154548697,
+        off=5,
+        flags=TH_PUSH | TH_ACK,
+        win=229,
+        urp=0,
+        data=data
+    )
+    assert bytes(tcp) == (
+        b"\xd1^\x005\xe00\xf5\x1b\t69\xd9P\x18\x00\xe5\x00\x00\x00\x00\x00\x1d"
+        b"\xa1\x8d\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com"
+        b"\x00\x00\x01\x00\x01"
+    )

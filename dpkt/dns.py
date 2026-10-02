@@ -438,6 +438,13 @@ class DNS(dpkt.Packet):
                 buf = self.pack_rr(buf, rr)
         del self.label_ptrs
         return buf
+    
+    def pack_for_tcp(self):
+        buf = bytes(self)
+        return struct.pack('>H', len(buf)) + buf
+
+def unpack_dns_over_tcp(buf):
+    return DNS(buf[2:])
 
 
 # TESTS
@@ -514,6 +521,10 @@ def define_testdata():
             "533d81a00001000100000000076578616d706c65036f72670000120001c00c001"
             "2000100000000000d0001086166732d686f7374c00c"
         )
+        dns_over_tcp_req = unhexlify(
+            "0024a18d010000010000000000000633326475616c087765626572646e7302646"
+            "50000010001"
+        )
     return TestData()
 
 
@@ -525,6 +536,13 @@ def test_basic():
     assert my_dns.an[0].name == 'google.com'
     assert bytes(my_dns) == buf
 
+def test_dns_over_tcp():
+    buf = define_testdata().dns_over_tcp_req
+    my_dns = unpack_dns_over_tcp(buf)
+
+    assert my_dns.id == 41357
+    assert len(my_dns.qd) == 1
+    assert my_dns.pack_for_tcp() == buf
 
 class TryExceptException:
     def __init__(self, exception_type, msg=''):
