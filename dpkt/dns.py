@@ -59,6 +59,10 @@ DNS_AAAA = 28
 DNS_LOC = 29
 DNS_SRV = 33
 DNS_OPT = 41
+DNS_DS = 43
+DNS_RRSIG = 46
+DNS_NSEC = 47
+DNS_DNSKEY = 48
 DNS_HTTPS = 65
 
 # RR classes
@@ -320,6 +324,28 @@ class DNS(dpkt.Packet):
                     pack_name(self.srvname, off + 6, label_ptrs)
             elif self.type == DNS_OPT:
                 return b''  # self.rdata
+            elif self.type == DNS_DS:
+                return struct.pack('>HBB', self.key_tag, self.algorithm, self.digest_type) + \
+                    self.digest
+            elif self.type == DNS_RRSIG:
+                l_ = []
+                l_.append(struct.pack(
+                    '>HBBIIIH', self.type_covered, self.algorithm, self.labels, 
+                    self.original_ttl, self.sig_expiration, self.sig_inception, self.key_tag
+                ))
+                # RFC 4034 forbids label compression on the Signer's Name field
+                l_.append(pack_name(self.signer_name, 0, {}))
+                l_.append(self.signature)
+                return b''.join(l_)
+            elif self.type == DNS_NSEC:
+                l_ = []
+                # RFC 4034 forbids label compression on the Next Domain Name field
+                l_.append(pack_name(self.nextdname, 0, {}))
+                l_.append(pack_type_bitmaps(self.types))
+                return b''.join(l_)
+            elif self.type == DNS_DNSKEY:
+                return struct.pack('>HBB', self.flags, self.protocol, self.algorithm) + \
+                    self.public_key
             elif self.type == DNS_HTTPS:
                 l_ = []
                 l_.append(struct.pack('>H', self.svcpriority))
@@ -377,6 +403,23 @@ class DNS(dpkt.Packet):
                 self.srvname, off = unpack_name(buf, off + 6)
             elif self.type == DNS_OPT:
                 pass  # RFC-6891: OPT is a pseudo-RR not carrying any DNS data
+            elif self.type == DNS_DS:
+                self.key_tag, self.algorithm, self.digest_type = struct.unpack('>HBB', self.rdata[:4])
+                self.digest = self.rdata[4:]
+            elif self.type == DNS_RRSIG:
+                buf = self.rdata
+                self.type_covered, self.algorithm, self.labels, self.original_ttl, \
+                    self.sig_expiration, self.sig_inception, self.key_tag = struct.unpack('>HBBIIIH', buf[:18])
+                self.signer_name, off = unpack_name(buf, 18)
+                self.signature = buf[off:]
+            elif self.type == DNS_NSEC:
+                buf = self.rdata
+                self.nextdname, off = unpack_name(buf, 0)
+                bitmaps = buf[off:]
+                self.types = unpack_type_bitmaps(bitmaps)
+            elif self.type == DNS_DNSKEY:
+                self.flags, self.protocol, self.algorithm = struct.unpack('>HBB', self.rdata[:4])
+                self.public_key = self.rdata[4:]
             elif self.type == DNS_HTTPS:
                 self.svcpriority, = struct.unpack('>H', buf[off:off + 2])
                 off += 2
@@ -471,6 +514,55 @@ def pack_loc_size(num):
     truncated = str(round(rounded, 1 - len(str(rounded))))
     return (int(truncated[0]) << 4) | len(truncated) - 1
 
+def unpack_type_bitmaps(buf):
+    """Unpacks a Type Bit Maps field that identifies a set of RR types, as
+    described by RFC 3845 / RFC 4043, and returns the included types as a list."""
+    ptr = 0
+    types = []
+    while ptr < len(buf):
+        block = buf[ptr]
+        bitmap_len = buf[ptr + 1]
+        ptr += 2
+        for octet_i in range(bitmap_len):
+            octet = buf[ptr + octet_i]
+            for bit_i in range(0, 8):
+                bit = bool(octet & (0x80 >> bit_i))
+                if bit:
+                    types.append(256*block + 8*octet_i + bit_i)
+        ptr += bitmap_len
+    return types
+
+def pack_type_bitmaps(types):
+    """Packs a list of RR types into a Type Bit Maps field, as described by
+    RFC 3845 / RFC 4043, and returns it as a bytes object."""
+    sorted_types = sorted(types)
+    bitmaps = b''
+    current_block = 0
+    octets = [0] * 32
+    for typ in sorted_types:
+        block = typ >> 8
+        if block != current_block:
+            # remove trailing empty octets
+            while octets and octets[-1] == 0:
+                octets.pop()
+            bitmap_len = len(octets)
+            if bitmap_len > 0:
+                # write current block
+                bitmaps += struct.pack('>BB', current_block, bitmap_len)
+                bitmaps += struct.pack('>' + 'B' * bitmap_len, *octets)
+            # begin next block
+            current_block = block
+            octets = [0] * 32
+        octet_i = (typ & 0xf8) >> 3
+        bit_i = typ & 0x07
+        octets[octet_i] |= 0x80 >> bit_i
+    while octets and octets[-1] == 0:
+        octets.pop()
+    bitmap_len = len(octets)
+    if bitmap_len > 0:
+        bitmaps += struct.pack('>BB', current_block, bitmap_len)
+        bitmaps += struct.pack('>' + 'B' * bitmap_len, *octets)
+    return bitmaps
 
 # TESTS
 
@@ -550,6 +642,37 @@ def define_testdata():
             "314f81a00001000100000000086d616e792d727273087765626572646e7302646"
             "500001d0001c00c001d000100000e100010002353138ac89fec81daf8940098df"
             "28"
+        )
+        ds_resp = unhexlify(
+            "c4f781a00001000100000000087765626572646e7302646500002b0001c00c002"
+            "b00010000a7c400240f280802e262b8d6cb3e818b114d03393e758dd60c663df0"
+            "9a97422d7c4e2436860741b5"
+        )
+        rrsig_resp = unhexlify(
+            "077181a000010002000000000161087765626572646e730264650000010001c00"
+            "c0001000100000e100004cb007101c00c002e000100000e10009f000108030000"
+            "0e105dd2ddd05dab4a8a30f0087765626572646e73026465002285b7640fe5604"
+            "57ae8a54e8ac7c2439907cf714de731beadc90f9edff17b17e85deebfdef53c0d"
+            "432b9bda3f9a671cef9999d7ab816e9fb3acbf7e747325b6de8b8738a287960ca"
+            "beca61319b982e30c5977886d7ab2b41a0d41ac306f6f09b35d81c43bdadd447b"
+            "711bf0ae1cb0c9134f6856b26c840344d51f890c9fad3e"
+        )
+        nsec_resp = unhexlify(
+            "4e0a81a00001000100000000086d616e792d727273087765626572646e7302646"
+            "500002f0001c00c002f0001000000b40018076578616d706c65036e6574000006"
+            "4000c00c002b010140"
+        )
+        dnskey_resp = unhexlify(
+            "cf5b860000010001000000000472697065036e65740000300001c00c003000010"
+            "0000e1001080101030803010001ff6463d5bced6964068a2e1061a2a107d97f05"
+            "976be21bd629b41ff249b60a639a423fe49a8de04eb18fc77db1462067d17c4d3"
+            "5471a5d47a4717d383d1148c398747221e3f6208c841334a1843ad4a1d58a6b6f"
+            "cd4d7308013eac443f143f550ac5e82a68076d2e453ed4dace8c439efb4c0c73b"
+            "a4fb1cdb62adcd35ca182689d9b101fb239daa836a30810c9c09bfac3a41b0178"
+            "60601931b4dc463328f8edf2423ede3e94cbf4670389826a1122f9130c164c9ba"
+            "e3eef3d7ac37975820a0dddba8b75bddda1381fbd87b94caa0ecc3bebae09e01e"
+            "652d60e5500abdee1227c58d4a9749bea5825326bbc33dc576c744dacaebdc110"
+            "866a0f00cd90f8cb653"
         )
         dns_over_tcp_req = unhexlify(
             "0024a18d010000010000000000000633326475616c087765626572646e7302646"
@@ -973,6 +1096,136 @@ def test_rdata_LOC():
 @TryExceptException(dpkt.UnpackError)
 def test_invalid_loc_size():
     unpack_loc_size(0x0a)
+
+def test_rdata_DS():
+    buf = define_testdata().ds_resp
+    unpacked_ds = DNS(buf)
+    assert len(unpacked_ds.an) == 1
+    an = unpacked_ds.an[0]
+    assert an.type == DNS_DS
+    assert an.key_tag == 0x0f28
+    assert an.algorithm == 8
+    assert an.digest_type == 2
+    assert an.digest == b'\xe2b\xb8\xd6\xcb>\x81\x8b\x11M\x039>u\x8d\xd6\x0c' \
+        b'f=\xf0\x9a\x97B-|N$6\x86\x07A\xb5'
+    
+    from binascii import unhexlify
+    rr = DNS.RR(
+        type=DNS_DS,
+        cls=DNS_IN,
+        ttl=180,
+        key_tag=0x0e32,
+        algorithm=10,
+        digest_type=2,
+        digest=unhexlify(
+            "e262b8d6cb3e818b114d03393e758dd60c663df09a97422d7c4e2436860741b5"
+        )
+    )
+    packed_rdata = rr.pack_rdata(0, {})
+    correct = b'\x0e2\n\x02\xe2b\xb8\xd6\xcb>\x81\x8b\x11M\x039>u\x8d\xd6' \
+        b'\x0cf=\xf0\x9a\x97B-|N$6\x86\x07A\xb5'
+    assert packed_rdata == correct
+
+def test_rdata_RRSIG():
+    from binascii import unhexlify
+    buf = define_testdata().rrsig_resp
+    unpacked_rrsig = DNS(buf)
+    assert len(unpacked_rrsig.an) == 2
+    an = unpacked_rrsig.an[1]
+    assert an.type == DNS_RRSIG
+    assert an.type_covered == 1
+    assert an.algorithm == 8
+    assert an.labels == 3
+    assert an.original_ttl == 3600
+    assert an.sig_expiration == 0x5dd2ddd0
+    assert an.sig_inception == 0x5dab4a8a
+    assert an.key_tag == 12528
+    assert an.signer_name == "weberdns.de"
+    assert an.signature == unhexlify(
+        "2285b7640fe560457ae8a54e8ac7c2439907cf714de731beadc90f9edff17b17e85de"
+        "ebfdef53c0d432b9bda3f9a671cef9999d7ab816e9fb3acbf7e747325b6de8b8738a2"
+        "87960cabeca61319b982e30c5977886d7ab2b41a0d41ac306f6f09b35d81c43bdadd4"
+        "47b711bf0ae1cb0c9134f6856b26c840344d51f890c9fad3e"
+    )
+    
+    rr = DNS.RR(
+        type=DNS_RRSIG,
+        cls=DNS_IN,
+        ttl=3600,
+        type_covered=28,
+        algorithm=8,
+        labels=3,
+        original_ttl=3600,
+        sig_inception=0x6ac18317,
+        sig_expiration=0x6ae92c37,
+        key_tag=0x30f0,
+        signer_name="example.com",
+        signature=unhexlify(
+            "e262b8d6cb3e818b114d03393e758dd60c663df09a97422d7c4e2436860741b5"
+        )
+    )
+    packed_rdata = rr.pack_rdata(0, {})
+    correct = b'\x00\x1c\x08\x03\x00\x00\x0e\x10j\xe9,7j\xc1\x83\x170\xf0' \
+        b'\x07example\x03com\x00\xe2b\xb8\xd6\xcb>\x81\x8b\x11M\x039>u\x8d' \
+        b'\xd6\x0cf=\xf0\x9a\x97B-|N$6\x86\x07A\xb5'
+    assert packed_rdata == correct
+
+def test_rdata_NSEC():
+    buf = define_testdata().nsec_resp
+    unpacked_nsec = DNS(buf)
+    assert len(unpacked_nsec.an) == 1
+    an = unpacked_nsec.an[0]
+    assert an.type == DNS_NSEC
+    assert an.nextdname == "example.net"
+    assert len(an.types) == 10
+    for typ in [1, 16, 17, 28, 29, 42, 44, 46, 47, 257]:
+        assert typ in an.types
+    
+    rr = DNS.RR(
+        type=DNS_NSEC,
+        cls=DNS_IN,
+        ttl=180,
+        nextdname="google.com",
+        types=[1, 16, 256, 32768]
+    )
+    packed_rdata = rr.pack_rdata(0, {})
+    correct = b'\x06google\x03com\x00\x00\x03@\x00\x80\x01\x01\x80\x80\x01\x80'
+    assert packed_rdata == correct
+
+def test_rdata_DNSKEY():
+    buf = define_testdata().dnskey_resp
+    unpacked_dnskey = DNS(buf)
+    assert len(unpacked_dnskey.an) == 1
+    an = unpacked_dnskey.an[0]
+    assert an.type == DNS_DNSKEY
+    assert an.flags == 0x0101
+    assert an.protocol == 3
+    assert an.algorithm == 8
+    assert an.public_key == b'\x03\x01\x00\x01\xffdc\xd5\xbc\xedid\x06\x8a.' \
+        b'\x10a\xa2\xa1\x07\xd9\x7f\x05\x97k\xe2\x1b\xd6)\xb4\x1f\xf2I\xb6\n' \
+        b'c\x9aB?\xe4\x9a\x8d\xe0N\xb1\x8f\xc7}\xb1F g\xd1|M5G\x1a]G\xa4q}8=' \
+        b'\x11H\xc3\x98tr!\xe3\xf6 \x8c\x84\x134\xa1\x84:\xd4\xa1\xd5\x8ako' \
+        b'\xcdMs\x08\x01>\xacD?\x14?U\n\xc5\xe8*h\x07m.E>\xd4\xda\xce\x8cC' \
+        b'\x9e\xfbL\x0cs\xbaO\xb1\xcd\xb6*\xdc\xd3\\\xa1\x82h\x9d\x9b\x10' \
+        b'\x1f\xb29\xda\xa86\xa3\x08\x10\xc9\xc0\x9b\xfa\xc3\xa4\x1b\x01x``' \
+        b'\x191\xb4\xdcF3(\xf8\xed\xf2B>\xde>\x94\xcb\xf4g\x03\x89\x82j\x11"' \
+        b'\xf9\x13\x0c\x16L\x9b\xae>\xef=z\xc3yu\x82\n\r\xdd\xba\x8bu\xbd' \
+        b'\xdd\xa18\x1f\xbd\x87\xb9L\xaa\x0e\xcc;\xeb\xae\t\xe0\x1ee-`\xe5P' \
+        b'\n\xbd\xee\x12\'\xc5\x8dJ\x97I\xbe\xa5\x82S&\xbb\xc3=\xc5v\xc7D' \
+        b'\xda\xca\xeb\xdc\x11\x08f\xa0\xf0\x0c\xd9\x0f\x8c\xb6S'
+    
+    rr = DNS.RR(
+        type=DNS_DNSKEY,
+        cls=DNS_IN,
+        ttl=180,
+        flags=0x0100,
+        protocol=3,
+        algorithm=10,
+        public_key=b'abcdefghijklmnopqrstuvwxyz'
+    )
+    packed_rdata = rr.pack_rdata(0, {})
+    correct = b'\x01\x00\x03\nabcdefghijklmnopqrstuvwxyz'
+    assert packed_rdata == correct
 
 def test_dns_len():
     my_dns = DNS()
