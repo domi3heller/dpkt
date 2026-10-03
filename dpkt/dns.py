@@ -56,6 +56,7 @@ DNS_TXT = 16
 DNS_RP = 17
 DNS_AFSDB = 18
 DNS_AAAA = 28
+DNS_LOC = 29
 DNS_SRV = 33
 DNS_OPT = 41
 DNS_HTTPS = 65
@@ -306,6 +307,14 @@ class DNS(dpkt.Packet):
                     pack_name(self.hostname, off + 2, label_ptrs)
             elif self.type == DNS_AAAA:
                 return self.ip6
+            elif self.type == DNS_LOC:
+                size = pack_loc_size(self.size)
+                horiz_prec = pack_loc_size(self.horiz_prec)
+                vert_prec = pack_loc_size(self.vert_prec)
+                return struct.pack(
+                    '>BBBBIII', self.version, size, horiz_prec, vert_prec,
+                    self.latitude, self.longitude, self.altitude
+                )
             elif self.type == DNS_SRV:
                 return struct.pack('>HHH', self.priority, self.weight, self.port) + \
                     pack_name(self.srvname, off + 6, label_ptrs)
@@ -355,6 +364,12 @@ class DNS(dpkt.Packet):
                 self.hostname, off = unpack_name(buf, off + 2)
             elif self.type == DNS_AAAA:
                 self.ip6 = self.rdata
+            elif self.type == DNS_LOC:
+                self.version, size, horiz_prec, vert_prec, self.latitude, \
+                    self.longitude, self.altitude = struct.unpack('>BBBBIII', self.rdata)
+                self.size = unpack_loc_size(size)
+                self.horiz_prec = unpack_loc_size(horiz_prec)
+                self.vert_prec = unpack_loc_size(vert_prec)
             elif self.type == DNS_NULL:
                 self.null = codecs.encode(self.rdata, 'hex')
             elif self.type == DNS_SRV:
@@ -446,6 +461,16 @@ class DNS(dpkt.Packet):
 def unpack_dns_over_tcp(buf):
     return DNS(buf[2:])
 
+def unpack_loc_size(byte):
+    if byte & 0xf0 > 144 or byte & 0x0f > 9 or (byte in range(1, 10)):
+        raise dpkt.UnpackError("Invalid size or precision 0x%02x in DNS LOC record" % byte)
+    return ((byte & 0xf0) >> 4) * 10**(byte & 0x0f)
+
+def pack_loc_size(num):
+    rounded = max(0, min(round(num), 9000000000))
+    truncated = str(round(rounded, 1 - len(str(rounded))))
+    return (int(truncated[0]) << 4) | len(truncated) - 1
+
 
 # TESTS
 
@@ -520,6 +545,11 @@ def define_testdata():
         afsdb_resp = unhexlify(
             "533d81a00001000100000000076578616d706c65036f72670000120001c00c001"
             "2000100000000000d0001086166732d686f7374c00c"
+        )
+        loc_resp = unhexlify(
+            "314f81a00001000100000000086d616e792d727273087765626572646e7302646"
+            "500001d0001c00c001d000100000e100010002353138ac89fec81daf8940098df"
+            "28"
         )
         dns_over_tcp_req = unhexlify(
             "0024a18d010000010000000000000633326475616c087765626572646e7302646"
@@ -910,6 +940,39 @@ def test_rdata_AFSDB():
     packed_rdata = rr.pack_rdata(0, {})
     correct = b'\x00\x01\x03afs\x07example\x03net\x00'
     assert packed_rdata == correct
+
+def test_rdata_LOC():
+    buf = define_testdata().loc_resp
+    unpacked_loc = DNS(buf)
+    assert len(unpacked_loc.an) == 1
+    an = unpacked_loc.an[0]
+    assert an.version == 0
+    assert an.size == 2000
+    assert an.horiz_prec == 5000
+    assert an.vert_prec == 1000
+    assert an.latitude == 2328403948
+    assert an.longitude == 2178611348
+    assert an.altitude == 10018600
+
+    rr = DNS.RR(
+        type=DNS_LOC,
+        cls=DNS_IN,
+        ttl=3600,
+        version=0,
+        size=1500,
+        horiz_prec=4000,
+        vert_prec=100.0,
+        latitude=2334989316,
+        longitude=2166087483,
+        altitude=10001000
+    )
+    packed_rdata = rr.pack_rdata(0, {})
+    correct = b'\x00#C\x12\x8b-\x1c\x04\x81\x1b\xdf;\x00\x98\x9ah'
+    assert packed_rdata == correct
+
+@TryExceptException(dpkt.UnpackError)
+def test_invalid_loc_size():
+    unpack_loc_size(0x0a)
 
 def test_dns_len():
     my_dns = DNS()
