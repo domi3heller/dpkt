@@ -63,6 +63,8 @@ DNS_DS = 43
 DNS_RRSIG = 46
 DNS_NSEC = 47
 DNS_DNSKEY = 48
+DNS_NSEC3 = 50
+DNS_NSEC3PARAM = 51
 DNS_HTTPS = 65
 
 # RR classes
@@ -346,6 +348,20 @@ class DNS(dpkt.Packet):
             elif self.type == DNS_DNSKEY:
                 return struct.pack('>HBB', self.flags, self.protocol, self.algorithm) + \
                     self.public_key
+            elif self.type == DNS_NSEC3:
+                l_ = []
+                l_.append(struct.pack('>BBHB', self.hash_algorithm, self.flags, self.iterations, self.salt_length))
+                l_.append(self.salt)
+                l_.append(struct.pack('>B', self.hash_length))
+                l_.append(self.next_hashed_owner_name)
+                bitmaps = pack_type_bitmaps(self.types)
+                l_.append(bitmaps)
+                return b''.join(l_)
+            elif self.type == DNS_NSEC3PARAM:
+                l_ = []
+                l_.append(struct.pack('>BBHB', self.hash_algorithm, self.flags, self.iterations, self.salt_length))
+                l_.append(self.salt)
+                return b''.join(l_)
             elif self.type == DNS_HTTPS:
                 l_ = []
                 l_.append(struct.pack('>H', self.svcpriority))
@@ -420,6 +436,22 @@ class DNS(dpkt.Packet):
             elif self.type == DNS_DNSKEY:
                 self.flags, self.protocol, self.algorithm = struct.unpack('>HBB', self.rdata[:4])
                 self.public_key = self.rdata[4:]
+            elif self.type == DNS_NSEC3:
+                buf = self.rdata
+                self.hash_algorithm, self.flags, self.iterations, self.salt_length = struct.unpack(">BBHB", buf[:5])
+                off = 5
+                self.salt = buf[off:off + self.salt_length]
+                off += self.salt_length
+                self.hash_length, = struct.unpack('>B', buf[off:off + 1])
+                off += 1
+                self.next_hashed_owner_name = buf[off:off + self.hash_length]
+                off += self.hash_length
+                bitmaps = buf[off:]
+                self.types = unpack_type_bitmaps(bitmaps)
+            elif self.type == DNS_NSEC3PARAM:
+                self.hash_algorithm, self.flags, self.iterations, self.salt_length = struct.unpack(">BBHB", buf[off:off + 5])
+                off += 5
+                self.salt = buf[off:off + self.salt_length]
             elif self.type == DNS_HTTPS:
                 self.svcpriority, = struct.unpack('>H', buf[off:off + 2])
                 off += 2
@@ -673,6 +705,16 @@ def define_testdata():
             "e3eef3d7ac37975820a0dddba8b75bddda1381fbd87b94caa0ecc3bebae09e01e"
             "652d60e5500abdee1227c58d4a9749bea5825326bbc33dc576c744dacaebdc110"
             "866a0f00cd90f8cb653"
+        )
+        nsec3_resp = unhexlify(
+            "f13580100001000000010000076e732d3133373209617773646e732d3433036f7"
+            "267000001000120683970377537747232753931643076306c6a73396c31676964"
+            "6e703930753368c01e003200010001518000270101000104d399eaab148a72ade"
+            "cc64f4de46030e412e0d6d2ed08d7581d000722000000000290"
+        )
+        nsec3param_resp = unhexlify(
+            "007d81a00001000100000000057373686670036e65740000330001c00c0033000"
+            "100000005001501000014107b1a90a916197e45d0772abcb6441156"
         )
         dns_over_tcp_req = unhexlify(
             "0024a18d010000010000000000000633326475616c087765626572646e7302646"
@@ -1225,6 +1267,67 @@ def test_rdata_DNSKEY():
     )
     packed_rdata = rr.pack_rdata(0, {})
     correct = b'\x01\x00\x03\nabcdefghijklmnopqrstuvwxyz'
+    assert packed_rdata == correct
+
+def test_rdata_NSEC3():
+    buf = define_testdata().nsec3_resp
+    unpacked_nsec3 = DNS(buf)
+    assert len(unpacked_nsec3.ns) == 1
+    ns = unpacked_nsec3.ns[0]
+    assert ns.type == DNS_NSEC3
+    assert ns.name == "h9p7u7tr2u91d0v0ljs9l1gidnp90u3h.org"
+    assert ns.hash_algorithm == 1
+    assert ns.flags == 0x01
+    assert ns.iterations == 1
+    assert ns.salt_length == 4
+    assert ns.salt == b'\xd3\x99\xea\xab'
+    assert ns.hash_length == 20
+    assert ns.next_hashed_owner_name == b'\x8ar\xad\xec\xc6OM\xe4`0\xe4\x12\xe0\xd6\xd2\xed\x08\xd7X\x1d'
+    for typ in [DNS_NS, DNS_SOA, DNS_RRSIG, DNS_DNSKEY, DNS_NSEC3PARAM]:
+        assert typ in ns.types
+    
+    rr = DNS.RR(
+        type=DNS_NSEC3,
+        cls=DNS_IN,
+        ttl=3600,
+        hash_algorithm=1,
+        flags=0x01,
+        iterations=1,
+        salt_length=0,
+        salt=b'',
+        hash_length=20,
+        next_hashed_owner_name=b'D\tSd7WI^\x0b"\xf6\xe6\xc8\x86\xa6\x1c\xb7\x13\x81\x17',
+        types=[DNS_RRSIG, DNS_DNSKEY, DNS_NSEC3PARAM],
+    )
+    packed_rdata = rr.pack_rdata(0, {})
+    correct = b'\x01\x01\x00\x01\x00\x14D\tSd7WI^\x0b"\xf6\xe6\xc8\x86\xa6\x1c\xb7\x13\x81\x17\x00\x07\x00\x00\x00\x00\x00\x02\x90'
+    assert packed_rdata == correct
+
+def test_rdata_NSEC3PARAM():
+    buf = define_testdata().nsec3param_resp
+    unpacked_nsec3param = DNS(buf)
+    assert len(unpacked_nsec3param.an) == 1
+    an = unpacked_nsec3param.an[0]
+    assert an.type == DNS_NSEC3PARAM
+    assert an.name == "sshfp.net"
+    assert an.hash_algorithm == 1
+    assert an.flags == 0x00
+    assert an.iterations == 20
+    assert an.salt_length == 16
+    assert an.salt == b'{\x1a\x90\xa9\x16\x19~E\xd0w*\xbc\xb6D\x11V'
+    
+    rr = DNS.RR(
+        type=DNS_NSEC3PARAM,
+        cls=DNS_IN,
+        ttl=5,
+        hash_algorithm=1,
+        flags=0x00,
+        iterations=1,
+        salt_length=20,
+        salt=b'{\x1a\x90\xa9\x16\x19~E\xd0w*\xbc\xb6D\x11V',
+    )
+    packed_rdata = rr.pack_rdata(0, {})
+    correct = b'\x01\x00\x00\x01\x14{\x1a\x90\xa9\x16\x19~E\xd0w*\xbc\xb6D\x11V'
     assert packed_rdata == correct
 
 def test_dns_len():
