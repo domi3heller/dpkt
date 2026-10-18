@@ -556,15 +556,10 @@ class Writer(object):
         self.__f.close()
 
 
-class Reader(object):
-    """Simple pypcap-compatible pcapng file reader."""
-
-    def __init__(self, fileobj):
-        self.name = getattr(fileobj, 'name', '<{0}>'.format(fileobj.__class__.__name__))
-        self.__f = fileobj
-
+class Section(object):
+    def __init__(self, buf, file):
         shb = SectionHeaderBlock()
-        buf = self.__f.read(shb.__hdr_len__)
+        buf += file.read(shb.__hdr_len__ - len(buf))
         if len(buf) < shb.__hdr_len__:
             raise ValueError('invalid pcapng header')
 
@@ -575,12 +570,12 @@ class Reader(object):
 
         # determine the correct byte order and reload full SHB
         if shb.bom == BYTE_ORDER_MAGIC_LE:
-            self.__le = True
-            buf += self.__f.read(_swap32b(shb.len) - shb.__hdr_len__)
+            self.le = True
+            buf += file.read(_swap32b(shb.len) - shb.__hdr_len__)
             shb = SectionHeaderBlockLE(buf)
         elif shb.bom == BYTE_ORDER_MAGIC:
-            self.__le = False
-            buf += self.__f.read(shb.len - shb.__hdr_len__)
+            self.le = False
+            buf += file.read(shb.len - shb.__hdr_len__)
             shb = SectionHeaderBlock(buf)
         else:
             raise ValueError('unknown endianness')
@@ -588,41 +583,36 @@ class Reader(object):
         # check if this version is supported
         if shb.v_major != PCAPNG_VERSION_MAJOR:
             raise ValueError('unknown pcapng version {0}.{1}'.format(shb.v_major, shb.v_minor,))
+        self.shb = shb
+        self.interfaces = {}
+    
+    def register_interface(self, idb):
+        next_if_number = len(self.interfaces)
+        self.interfaces[next_if_number] = Interface(idb)
+    
+    def get_interface(self, iface_id):
+        try:
+            return self.interfaces[iface_id]
+        except KeyError:
+            raise ValueError(f"packet refers to interface with id {iface_id} that does not exist")
 
-        # look for a mandatory IDB
-        idb = None
-        while 1:
-            buf = self.__f.read(8)
-            if len(buf) < 8:
-                break
 
-            blk_type, blk_len = struct_unpack('<II' if self.__le else '>II', buf)
-            buf += self.__f.read(blk_len - 8)
-
-            if blk_type == PCAPNG_BT_IDB:
-                idb = (InterfaceDescriptionBlockLE(buf) if self.__le
-                       else InterfaceDescriptionBlock(buf))
-                break
-            # just skip other blocks
-
-        if idb is None:
-            raise ValueError('IDB not found')
-
-        # set timestamp resolution and offset
-        self._divisor = 1000000  # defaults
-        self._tsoffset = 0
+class Interface(object):
+    def __init__(self, idb):
+        self.ts_divisor = 1000000  # defaults
+        self.ts_offset = 0
         for opt in idb.opts:
             if opt.code == PCAPNG_OPT_IF_TSRESOL:
                 # if MSB=0, the remaining bits is a neg power of 10 (e.g. 6 means microsecs)
                 # if MSB=1, the remaining bits is a neg power of 2 (e.g. 10 means 1/1024 of second)
                 opt_val = struct_unpack('b', opt.data)[0]
                 pow_num = 2 if opt_val & 0b10000000 else 10
-                self._divisor = pow_num ** (opt_val & 0b01111111)
+                self.ts_divisor = pow_num ** (opt_val & 0b01111111)
 
             elif opt.code == PCAPNG_OPT_IF_TSOFFSET:
                 # 64-bit int that specifies an offset (in seconds) that must be added to the
                 # timestamp of each packet
-                self._tsoffset = struct_unpack('<q' if self.__le else '>q', opt.data)[0]
+                self.ts_offset = struct_unpack('<q' if self.__le else '>q', opt.data)[0]
 
         if idb.linktype in dltoff:
             self.dloff = dltoff[idb.linktype]
@@ -631,6 +621,18 @@ class Reader(object):
 
         self.idb = idb
         self.snaplen = idb.snaplen
+
+    def resolve_timestamp(self, ts_high, ts_low):
+        return self.ts_offset + (((ts_high << 32) | ts_low) / self.ts_divisor)
+
+
+class Reader(object):
+    """Simple pypcap-compatible pcapng file reader."""
+
+    def __init__(self, fileobj):
+        self.name = getattr(fileobj, 'name', '<{0}>'.format(fileobj.__class__.__name__))
+        self.__f = fileobj
+        self.current_section = None
         self.filter = ''
         self.__iter = iter(self)
 
@@ -686,20 +688,35 @@ class Reader(object):
 
     def __iter__(self):
         while 1:
-            buf = self.__f.read(8)
-            if len(buf) < 8:
+            buf = self.__f.read(4)
+            if len(buf) < 4:
                 break
 
+            blk_type, = struct_unpack('I', buf)
+            if blk_type == PCAPNG_BT_SHB:
+                self.current_section = Section(buf, self.__f)
+                self.__le = self.current_section.le
+                continue
+            if self.current_section is None:
+                raise ValueError('invalid pcapng header: not a SHB')
+            
+            buf += self.__f.read(4)
             blk_type, blk_len = struct_unpack('<II' if self.__le else '>II', buf)
             buf += self.__f.read(blk_len - 8)
 
-            if blk_type == PCAPNG_BT_EPB:
+            if blk_type == PCAPNG_BT_IDB:
+                idb = InterfaceDescriptionBlockLE(buf) if self.__le else InterfaceDescriptionBlock(buf)
+                self.current_section.register_interface(idb)
+                continue
+            elif blk_type == PCAPNG_BT_EPB:
                 epb = EnhancedPacketBlockLE(buf) if self.__le else EnhancedPacketBlock(buf)
-                ts = self._tsoffset + (((epb.ts_high << 32) | epb.ts_low) / self._divisor)
+                interface = self.current_section.get_interface(epb.iface_id)
+                ts = interface.resolve_timestamp(epb.ts_high, epb.ts_low)
                 yield (ts, epb.pkt_data)
             elif blk_type == PCAPNG_BT_PB:
                 pb = PacketBlockLE(buf) if self.__le else PacketBlock(buf)
-                ts = self._tsoffset + (((pb.ts_high << 32) | pb.ts_low) / self._divisor)
+                interface = self.current_section.get_interface(pb.iface_id)
+                ts = interface.resolve_timestamp(pb.ts_high, pb.ts_low)
                 yield (ts, pb.pkt_data)
 
             # just ignore other blocks
