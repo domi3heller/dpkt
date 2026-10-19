@@ -12,7 +12,7 @@ from zlib import crc32
 
 from . import dpkt
 from . import llc
-from .utils import mac_to_str
+from .utils import mac_to_str, swap32b
 from .compat import compat_ord, iteritems, isstr
 
 ETH_CRC_LEN = 4
@@ -273,7 +273,7 @@ class Ethernet(dpkt.Packet):
                             fcs_buf = fcs_buf[VLANtagISL.__hdr_len__:]
                     fcs_buf += getattr(self, 'padding', b'')
                     revcrc = crc32(fcs_buf) & 0xffffffff
-                    fcs = struct.unpack('<I', struct.pack('>I', revcrc))[0]  # bswap32
+                    fcs = swap32b(revcrc)
                 fcs = struct.pack('>I', fcs)
             tail = getattr(self, 'padding', b'') + fcs + getattr(self, 'trailer', b'')
         return bytes(dpkt.Packet.__bytes__(self) + tail)

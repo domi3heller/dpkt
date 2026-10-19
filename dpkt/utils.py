@@ -1,5 +1,6 @@
 """Various Utility Functions"""
 import socket
+import struct
 import warnings
 from .compat import compat_ord
 from .dns import DNS
@@ -58,6 +59,32 @@ def is_builtin(obj):
 def deprecation_warning(*args):
     """print a deprecation warning"""
     warnings.warn(*args, stacklevel=2)
+
+
+def swap32b(i):
+    """Swap endianness of an uint32"""
+    return struct.unpack('<I', struct.pack('>I', i))[0]
+
+
+def align32b(i):
+    """Return int `i` aligned to the 32-bit boundary"""
+    r = i % 4
+    return i if not r else i + 4 - r
+
+
+def padded(s):
+    """Return bytes `s` padded with zeroes to align to the 32-bit boundary"""
+    return struct.pack('%ss' % align32b(len(s)), s)
+
+
+def padded_tolen(s, tolen):
+    """Return bytes `s` padded with `tolen` zeroes to align to the 32-bit boundary"""
+    return struct.pack('%ss' % tolen, s)
+
+
+def padlen(s):
+    """Return size of padding required to align str `s` to the 32-bit boundary"""
+    return align32b(len(s)) - len(s)
 
 
 def test_utils():

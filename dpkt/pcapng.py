@@ -7,12 +7,13 @@ from __future__ import print_function
 from __future__ import absolute_import
 from __future__ import division  # so python 2 doesn't do integer division
 
-from struct import pack as struct_pack, unpack as struct_unpack
+from struct import unpack as struct_unpack
 from time import time
 import sys
 
 from . import dpkt
 from .compat import BytesIO, intround
+from .utils import swap32b, align32b, padded, padded_tolen, padlen
 
 BYTE_ORDER_MAGIC = 0x1A2B3C4D
 BYTE_ORDER_MAGIC_LE = 0x4D3C2B1A
@@ -80,32 +81,6 @@ dltoff = {DLT_NULL: 4, DLT_EN10MB: 14, DLT_IEEE802: 22, DLT_ARCNET: 6,
           DLT_SLIP: 16, DLT_PPP: 4, DLT_FDDI: 21, DLT_PFLOG: 48, DLT_PFSYNC: 4,
           DLT_LOOP: 4, DLT_LINUX_SLL: 16}
 # </copied from pcap.py>
-
-
-def _swap32b(i):
-    """Swap endianness of an uint32"""
-    return struct_unpack('<I', struct_pack('>I', i))[0]
-
-
-def _align32b(i):
-    """Return int `i` aligned to the 32-bit boundary"""
-    r = i % 4
-    return i if not r else i + 4 - r
-
-
-def _padded(s):
-    """Return bytes `s` padded with zeroes to align to the 32-bit boundary"""
-    return struct_pack('%ss' % _align32b(len(s)), s)
-
-
-def _padded_tolen(s, tolen):
-    """Return bytes `s` padded with `tolen` zeroes to align to the 32-bit boundary"""
-    return struct_pack('%ss' % tolen, s)
-
-
-def _padlen(s):
-    """Return size of padding required to align str `s` to the 32-bit boundary"""
-    return _align32b(len(s)) - len(s)
 
 
 class _PcapngBlock(dpkt.Packet):
@@ -208,10 +183,10 @@ class PcapngOption(dpkt.Packet):
 
         self.len = len(self.data)
         hdr = self._pack_hdr(self.code, self.len)
-        return hdr + _padded(self.data)
+        return hdr + padded(self.data)
 
     def __len__(self):
-        return self.__hdr_len__ + len(self.data) + _padlen(self.data)
+        return self.__hdr_len__ + len(self.data) + padlen(self.data)
 
     def __repr__(self):
         if self.code == PCAPNG_OPT_ENDOFOPT:
@@ -322,7 +297,7 @@ class EnhancedPacketBlock(_PcapngBlock):
         self.pkt_data = buf[po:po + self.caplen]
 
         # skip padding between pkt_data and options
-        opts_offset = po + _align32b(self.caplen)
+        opts_offset = po + align32b(self.caplen)
         self._do_unpack_options(buf, opts_offset)
 
     def __bytes__(self):
@@ -334,7 +309,7 @@ class EnhancedPacketBlock(_PcapngBlock):
 
         opts_buf = self._do_pack_options()
 
-        n = self.__hdr_len__ + _align32b(self.caplen) + len(opts_buf)
+        n = self.__hdr_len__ + align32b(self.caplen) + len(opts_buf)
         self.len = n
         self._len = n
 
@@ -349,11 +324,11 @@ class EnhancedPacketBlock(_PcapngBlock):
             n
         )
 
-        return b''.join([hdr_buf[:-4], _padded(pkt_buf), opts_buf, hdr_buf[-4:]])
+        return b''.join([hdr_buf[:-4], padded(pkt_buf), opts_buf, hdr_buf[-4:]])
 
     def __len__(self):
         opts_len = sum(len(o) for o in self.opts)
-        return self.__hdr_len__ + _align32b(self.caplen) + opts_len
+        return self.__hdr_len__ + align32b(self.caplen) + opts_len
 
 
 class EnhancedPacketBlockLE(EnhancedPacketBlock):
@@ -386,7 +361,7 @@ class PacketBlock(EnhancedPacketBlock):
 
         opts_buf = self._do_pack_options()
 
-        n = self.__hdr_len__ + _align32b(self.caplen) + len(opts_buf)
+        n = self.__hdr_len__ + align32b(self.caplen) + len(opts_buf)
         self.len = n
         self._len = n
 
@@ -402,7 +377,7 @@ class PacketBlock(EnhancedPacketBlock):
             n
         )
 
-        return b''.join([hdr_buf[:-4], _padded(pkt_buf), opts_buf, hdr_buf[-4:]])
+        return b''.join([hdr_buf[:-4], padded(pkt_buf), opts_buf, hdr_buf[-4:]])
 
 
 class PacketBlockLE(PacketBlock):
@@ -531,7 +506,7 @@ class Writer(object):
         for ts, pkt in pkts:
             ts = intround(ts * self._precision_multiplier)  # int microseconds
             pkt_len = len(pkt)
-            pkt_len_align = _align32b(pkt_len)
+            pkt_len_align = align32b(pkt_len)
 
             n = precalc_n + pkt_len_align
             hdr_buf = ph(
@@ -546,7 +521,7 @@ class Writer(object):
             )
             buf = b''.join([
                 hdr_buf[:-4],
-                _padded_tolen(pkt, pkt_len_align),
+                padded_tolen(pkt, pkt_len_align),
                 opts_buf,
                 hdr_buf[-4:]
             ])
@@ -571,7 +546,7 @@ class Section(object):
         # determine the correct byte order and reload full SHB
         if shb.bom == BYTE_ORDER_MAGIC_LE:
             self.le = True
-            buf += file.read(_swap32b(shb.len) - shb.__hdr_len__)
+            buf += file.read(swap32b(shb.len) - shb.__hdr_len__)
             shb = SectionHeaderBlockLE(buf)
         elif shb.bom == BYTE_ORDER_MAGIC:
             self.le = False
