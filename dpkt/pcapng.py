@@ -621,6 +621,7 @@ class Interface(object):
 
         self.idb = idb
         self.snaplen = idb.snaplen
+        self.linktype = idb.linktype
 
     def resolve_timestamp(self, ts_high, ts_low):
         return self.ts_offset + (((ts_high << 32) | ts_low) / self.ts_divisor)
@@ -712,12 +713,12 @@ class Reader(object):
                 epb = EnhancedPacketBlockLE(buf) if self.__le else EnhancedPacketBlock(buf)
                 interface = self.current_section.get_interface(epb.iface_id)
                 ts = interface.resolve_timestamp(epb.ts_high, epb.ts_low)
-                yield (ts, epb.pkt_data)
+                yield dpkt.CapturedPacket(epb, epb.pkt_data, ts, interface.linktype)
             elif blk_type == PCAPNG_BT_PB:
                 pb = PacketBlockLE(buf) if self.__le else PacketBlock(buf)
                 interface = self.current_section.get_interface(pb.iface_id)
                 ts = interface.resolve_timestamp(pb.ts_high, pb.ts_low)
-                yield (ts, pb.pkt_data)
+                yield dpkt.CapturedPacket(pb, pb.pkt_data, ts, interface.linktype)
 
             # just ignore other blocks
 

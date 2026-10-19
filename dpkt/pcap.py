@@ -396,7 +396,8 @@ class Reader(object):
                 break
             hdr = self.__ph(buf)
             buf = self.__f.read(hdr.caplen)
-            yield (hdr.tv_sec + (hdr.tv_usec / self._divisor), buf)
+            ts = hdr.tv_sec + (hdr.tv_usec / self._divisor)
+            yield dpkt.CapturedPacket(hdr, buf, ts, self.datalink())
 
 
 class UniversalReader(object):

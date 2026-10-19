@@ -349,6 +349,21 @@ class Packet(_MetaPacket("Temp", (object,), {})):
         self.data = buf[self.__hdr_len__:]
 
 
+class CapturedPacket(object):
+    """Unified container class for captured packets, regardless of filetype or header type"""
+    def __init__(self, hdr, data, ts, linktype):
+        self.ts = ts
+        self.linktype = linktype
+        self.hdr = hdr
+        self.data = data
+        self.caplen = hdr.caplen
+        if hasattr(hdr, "pkt_len"):
+            self.orig_len = hdr.pkt_len
+        else:
+            self.orig_len = hdr.len
+
+
+
 # XXX - ''.join([(len(`chr(x)`)==3) and chr(x) or '.' for x in range(256)])
 __vis_filter = (
     b'................................ !"#$%&\'()*+,-./0123456789:;<=>?'
