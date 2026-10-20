@@ -305,8 +305,8 @@ class EnhancedPacketBlock(_PcapngBlock):
         pkt_buf = self.pkt_data
 
         pkt_len = len(pkt_buf)
-        self.caplen = pkt_len
-        self.pkt_len = pkt_len
+        self.caplen = self.caplen or pkt_len
+        self.pkt_len = self.pkt_len or pkt_len
 
         opts_buf = self._do_pack_options()
 
@@ -320,8 +320,8 @@ class EnhancedPacketBlock(_PcapngBlock):
             self.iface_id,
             self.ts_high,
             self.ts_low,
-            pkt_len,
-            pkt_len,
+            self.caplen,
+            self.pkt_len,
             n
         )
 
