@@ -7,9 +7,10 @@ from __future__ import print_function
 from __future__ import absolute_import
 from __future__ import division  # so python 2 doesn't do integer division
 
-from struct import unpack as struct_unpack
+from math import log10, log2
 from time import time
 import sys
+import struct
 
 from . import dpkt
 from .compat import BytesIO, intround
@@ -119,7 +120,7 @@ class _PcapngBlock(dpkt.Packet):
                 break
 
         # duplicate total length field
-        self._len = struct_unpack(self.__hdr_fmt__[0] + 'I', buf[-4:])[0]
+        self._len = struct.unpack(self.__hdr_fmt__[0] + 'I', buf[-4:])[0]
         if self._len != self.len:
             raise dpkt.UnpackError('length fields do not match')
 
@@ -559,44 +560,70 @@ class Section(object):
         if shb.v_major != PCAPNG_VERSION_MAJOR:
             raise ValueError('unknown pcapng version {0}.{1}'.format(shb.v_major, shb.v_minor,))
         self.shb = shb
-        self.interfaces = {}
+        self.interfaces = []
     
     def register_interface(self, idb):
-        next_if_number = len(self.interfaces)
-        self.interfaces[next_if_number] = Interface(idb)
+        self.interfaces.append(Interface(idb))
     
     def get_interface(self, iface_id):
         try:
             return self.interfaces[iface_id]
-        except KeyError:
+        except IndexError:
             raise ValueError(f"packet refers to interface with id {iface_id} that does not exist")
 
 
 class Interface(object):
-    def __init__(self, idb):
-        self.ts_divisor = 1000000  # defaults
-        self.ts_offset = 0
-        for opt in idb.opts:
-            if opt.code == PCAPNG_OPT_IF_TSRESOL:
-                # if MSB=0, the remaining bits is a neg power of 10 (e.g. 6 means microsecs)
-                # if MSB=1, the remaining bits is a neg power of 2 (e.g. 10 means 1/1024 of second)
-                opt_val = struct_unpack('b', opt.data)[0]
-                pow_num = 2 if opt_val & 0b10000000 else 10
-                self.ts_divisor = pow_num ** (opt_val & 0b01111111)
+    def __init__(self, idb=None, ts_divisor=1_000_000, ts_offset=0, snaplen=1500, linktype=DLT_EN10MB):
+        self.ts_divisor = ts_divisor
+        self.ts_offset = ts_offset
+        self.snaplen = snaplen
+        self.linktype = linktype
+        if idb:
+            for opt in idb.opts:
+                if opt.code == PCAPNG_OPT_IF_TSRESOL:
+                    # if MSB=0, the remaining bits is a neg power of 10 (e.g. 6 means microsecs)
+                    # if MSB=1, the remaining bits is a neg power of 2 (e.g. 10 means 1/1024 of second)
+                    opt_val = struct.unpack('b', opt.data)[0]
+                    pow_num = 2 if opt_val & 0b10000000 else 10
+                    self.ts_divisor = pow_num ** (opt_val & 0b01111111)
 
-            elif opt.code == PCAPNG_OPT_IF_TSOFFSET:
-                # 64-bit int that specifies an offset (in seconds) that must be added to the
-                # timestamp of each packet
-                self.ts_offset = struct_unpack('<q' if self.__le else '>q', opt.data)[0]
+                elif opt.code == PCAPNG_OPT_IF_TSOFFSET:
+                    # 64-bit int that specifies an offset (in seconds) that must be added to the
+                    # timestamp of each packet
+                    self.ts_offset = struct.unpack('<q' if self.__le else '>q', opt.data)[0]
 
-        if idb.linktype in dltoff:
-            self.dloff = dltoff[idb.linktype]
-        else:
-            self.dloff = 0
+            if idb.linktype in dltoff:
+                self.dloff = dltoff[idb.linktype]
+            else:
+                self.dloff = 0
 
-        self.idb = idb
-        self.snaplen = idb.snaplen
-        self.linktype = idb.linktype
+            self.idb = idb
+            self.snaplen = idb.snaplen
+            self.linktype = idb.linktype
+    
+    def _get_ts_opts(self, le: False):
+        opts = []
+        opts_class = PcapngOptionLE if le else PcapngOption
+        if self.ts_divisor != 1_000_000:
+            l10 = log10(self.ts_divisor)
+            l2 = log2(self.ts_divisor)
+            if abs(round(l10) - l10) < 0.001 and round(l10) in range(0, 0b10000000):
+                opt_value = round(l10) & 0b01111111
+            elif abs(round(l2) - l2) < 0.001 and round(l2) in range(0, 0b10000000):
+                opt_value = 0b10000000 | (round(l2) & 0b01111111)
+            else:
+                raise ValueError("Invalid ts_divisor: must be power of 2 or 10")
+            opt_value = struct.pack('b', opt_value)
+            opts.append(opts_class(code=PCAPNG_OPT_IF_TSRESOL, len=1, data=opt_value))
+        if self.ts_offset != 0:
+            opt_value = struct.pack('<q' if le else '>q', self.ts_offset)
+            opt.append(opts_class(code=PCAPNG_OPT_IF_TSOFFSET, len=8, data=opt_value))
+        if len(opts) > 0:
+            opts.append(opts_class()) # defaults to PCAPNG_OPT_ENDOFOPT
+    
+    def to_idb(self, le: False):
+        idb_class = InterfaceDescriptionBlockLE if le else InterfaceDescriptionBlock
+        return idb_class(snaplen=self.snaplen, linktype=self.linktype, opts = self._get_ts_opts(le))
 
     def resolve_timestamp(self, ts_high, ts_low):
         return self.ts_offset + (((ts_high << 32) | ts_low) / self.ts_divisor)
@@ -668,7 +695,7 @@ class Reader(object):
             if len(buf) < 4:
                 break
 
-            blk_type, = struct_unpack('I', buf)
+            blk_type, = struct.unpack('I', buf)
             if blk_type == PCAPNG_BT_SHB:
                 self.current_section = Section(buf, self.__f)
                 self.__le = self.current_section.le
@@ -677,7 +704,7 @@ class Reader(object):
                 raise ValueError('invalid pcapng header: not a SHB')
             
             buf += self.__f.read(4)
-            blk_type, blk_len = struct_unpack('<II' if self.__le else '>II', buf)
+            blk_type, blk_len = struct.unpack('<II' if self.__le else '>II', buf)
             buf += self.__f.read(blk_len - 8)
 
             if blk_type == PCAPNG_BT_IDB:
