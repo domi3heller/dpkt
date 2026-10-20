@@ -329,6 +329,7 @@ class Reader(object):
             raise ValueError('invalid tcpdump header')
 
         self.__ph = MAGIC_TO_PKT_HDR[magic]
+        self.le = isinstance(self.__ph, LEPktHdr) or isinstance(self.__ph, LEPktModHdr)
 
 
         if self.__fh.linktype in dltoff:

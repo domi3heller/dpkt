@@ -351,8 +351,9 @@ class Packet(_MetaPacket("Temp", (object,), {})):
 
 class CapturedPacket(object):
     """Unified container class for captured packets, regardless of filetype or header type"""
-    def __init__(self, hdr, data, ts, linktype):
+    def __init__(self, hdr, data, ts, linktype, iface_id=0):
         self.ts = ts
+        self.iface_id = iface_id
         self.linktype = linktype
         self.hdr = hdr
         self.data = data
